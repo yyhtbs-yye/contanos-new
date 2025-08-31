@@ -1,0 +1,15 @@
+output
+output/*
+__MACOSX
+__MACOSX/*
+__pycache__/*
+__pycache__
+*.png
+*.jpg
+*.mp4
+*.onnx
+*.zip
+*.pth
+SJN-210k*
+SJN-210k/*
+output.txt

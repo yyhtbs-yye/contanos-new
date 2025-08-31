@@ -1,0 +1,227 @@
+import torch
+import torch.nn as nn
+from torchvision import transforms
+
+import numpy as np
+from PIL import Image
+import os
+from typing import List, Tuple
+
+from torchvision.models import mobilenet_v3_large, MobileNet_V3_Large_Weights, mobilenet_v3_small, MobileNet_V3_Small_Weights
+
+class JerseyOCRMobileNet(nn.Module):
+    def __init__(self, 
+                 pretrained=True, 
+                 dropout=0.1, 
+                 num_len=3, 
+                 num_digit=11, 
+                 use_small=False):
+        super().__init__()
+        if use_small:
+            weights = MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
+            self.backbone = mobilenet_v3_small(weights=weights)
+            # Replace classifier with identity; we'll add our own heads.
+            self.backbone.classifier = nn.Identity()
+            self.pool = nn.AdaptiveAvgPool2d(1)
+            feat_dim = 576
+        else:
+            weights = MobileNet_V3_Large_Weights.DEFAULT if pretrained else None
+            self.backbone = mobilenet_v3_large(weights=weights)
+            # Replace classifier with identity; we'll add our own heads.
+            self.backbone.classifier = nn.Identity()
+            self.pool = nn.AdaptiveAvgPool2d(1)
+            feat_dim = 960
+
+        self.feat_bn = nn.BatchNorm1d(feat_dim)  # mobilenet_v3_small last channels
+        self.dropout = nn.Dropout(dropout)
+        self.len_head = nn.Linear(feat_dim, num_len)
+        self.d1_head  = nn.Linear(feat_dim, num_digit)
+        self.d2_head  = nn.Linear(feat_dim, num_digit)
+
+    def forward(self, x):
+        # Expect x shape: [B, 3, 256, 192] (H, W) = (256, 192)
+        feats = self.backbone.features(x)          # [B, C, h, w]
+        pooled = self.pool(feats).flatten(1)       # [B, C]
+        pooled = self.feat_bn(pooled)
+        pooled = self.dropout(pooled)
+        len_logits = self.len_head(pooled)
+        d1_logits  = self.d1_head(pooled)
+        d2_logits  = self.d2_head(pooled)
+        return len_logits, d1_logits, d2_logits
+
+class JerseyOCR:
+    def __init__(self, 
+                 use_small: bool,
+                 weights_path: str,
+                 model_input_size: tuple = (256, 192),
+                 mean: tuple = (0.485, 0.456, 0.406),
+                 std: tuple = (0.229, 0.224, 0.225),
+                 device: str = 'cuda'):
+            self.model_input_size = model_input_size
+            self.mean = torch.tensor(mean, dtype=torch.float32).to(device).view(1, 3, 1, 1)
+            self.std = torch.tensor(std, dtype=torch.float32).to(device).view(1, 3, 1, 1)
+            self.device = device
+
+            if not os.path.exists(weights_path):
+                print(f"Downloading weights to {weights_path}...")
+                dirpath = os.path.dirname(weights_path)
+                if dirpath:
+                    os.makedirs(dirpath, exist_ok=True)
+                if use_small:
+                    os.system(f"gdown 1eFB5Wvjnnb2s2AmgXj8mFAZuK0kcEWZt -O {weights_path}")
+                else:
+                    os.system(f"gdown 16yQDv-n1ApjQUjEQrUV013lZ5Ejkhygj -O {weights_path}")
+
+            self.model = self._load_model(use_small, weights_path)
+            
+            self.transform = transforms.Compose([
+                # transforms.Resize(model_input_size),
+                transforms.ToTensor(),
+                # transforms.Normalize(mean, std),
+            ])
+
+    def _load_model(self, use_small: bool, weights_path: str):
+        model = JerseyOCRMobileNet(pretrained=True, use_small=use_small)
+        checkpoint = torch.load(weights_path, map_location=self.device)
+        state_dict = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
+        model.load_state_dict(state_dict, strict=True)
+        model.eval().to(self.device)
+        return model
+
+    def __call__(self, image: np.ndarray, bboxes: list = []):
+        if len(bboxes) == 0:
+            bboxes = [[0, 0, image.shape[1], image.shape[0]]]
+        
+        numbers = []
+        potential_numbers = []
+        confidences = []
+        cropped_imgs = []
+
+        # now = time()
+        for bbox in bboxes:
+            cropped_img = self.preprocess(image, bbox)
+            cropped_imgs.append(cropped_img)
+        
+        cropped_imgs = torch.stack(cropped_imgs, dim=0)
+        
+        # print(f"Preprocessing took {time() - now:.3f} seconds"); now = time()
+        
+        outputs = self.inference(cropped_imgs)
+
+        # print(f"Inference took {time() - now:.3f} seconds"); now = time()
+
+        numbers, potential_numbers, confidences = self.postprocess(*outputs)
+
+        # print(f"Postprocessing took {time() - now:.3f} seconds")
+
+        return numbers, potential_numbers, confidences
+
+    def preprocess(self, img: np.ndarray, bbox: list):
+        bbox = np.array(bbox)
+        
+        # crop and resize
+        cropped_img = self._crop_image(img, bbox)
+        pil_img = Image.fromarray(cropped_img).resize(self.model_input_size)
+        processed_img = self.transform(pil_img)
+        
+        return processed_img
+
+    def inference(self, img_tensor: torch.Tensor):
+        with torch.no_grad():
+            img_tensor = img_tensor.to(self.device, non_blocking=True)
+            # normalize the images
+            img_tensor = (img_tensor - self.mean) / self.std
+
+            len_logits, d1_logits, d2_logits = self.model(img_tensor)
+        return len_logits, d1_logits, d2_logits
+
+    def postprocess(self,
+                    len_logits: torch.Tensor,
+                    d1_logits: torch.Tensor,
+                    d2_logits: torch.Tensor
+                ) -> Tuple[List[str], List[str], List[float]]:
+        """
+        Args:
+            *_logits: (B, C) tensors of class logits for length, digit1, digit2.
+
+        Returns:
+            number_strs:         list[str]      length B
+            potential_numbers:   list[str]      length B
+            confidences:         list[float]    length B
+        """
+        # (B, C) -> (B, C) probabilities
+        len_probs = torch.softmax(len_logits, dim=1)
+        d1_probs  = torch.softmax(d1_logits,  dim=1)
+        d2_probs  = torch.softmax(d2_logits,  dim=1)
+
+        # (B,) predicted class indices
+        len_pred = len_probs.argmax(dim=1)
+        d1_pred  = d1_probs.argmax(dim=1)
+        d2_pred  = d2_probs.argmax(dim=1)
+
+        # (B,) confidence (probability of the chosen class), on the same device
+        conf_len = len_probs.gather(1, len_pred.unsqueeze(1)).squeeze(1)
+        conf_d1  = d1_probs.gather(1,  d1_pred.unsqueeze(1)).squeeze(1)
+        conf_d2  = d2_probs.gather(1,  d2_pred.unsqueeze(1)).squeeze(1)
+
+        # Convert to Python lists only for iteration / return
+        len_pred_list = len_pred.tolist()
+        d1_pred_list  = d1_pred.tolist()
+        d2_pred_list  = d2_pred.tolist()
+        conf_len_list = conf_len.detach().cpu().tolist()
+        conf_d1_list  = conf_d1.detach().cpu().tolist()
+        conf_d2_list  = conf_d2.detach().cpu().tolist()
+
+        number_strs: List[str] = []
+        potential_numbers: List[str] = []
+        confidences: List[float] = []
+
+        # Build per-sample outputs using your helpers
+        for lp, d1p, d2p, cl, c1, c2 in zip(
+            len_pred_list, d1_pred_list, d2_pred_list,
+            conf_len_list, conf_d1_list, conf_d2_list
+        ):
+            number_strs.append(self._assemble_number(lp, d1p, d2p))
+            potential_numbers.append(self._assemble_potential_number(lp, d1p, d2p))
+            confidences.append(self._calculate_score(lp, cl, c1, c2))
+
+        return number_strs, potential_numbers, confidences
+
+    def _crop_image(self, img: np.ndarray, bbox: list):
+        """Crop image using bbox coordinates."""
+        x1, y1, x2, y2 = bbox
+        x1, y1, x2, y2 = max(0, int(x1)), max(0, int(y1)), min(img.shape[1], int(x2)), min(img.shape[0], int(y2))
+        return img[y1:y2, x1:x2]
+
+    def _assemble_number(self, len_id: int, d1: int, d2: int):
+        # """Assemble number string from predictions."""
+        if len_id == 0:
+            return -1
+        if len_id == 1:
+            return d1 if d1 != 10 else -1
+        if len_id == 2:
+            if d1 == 10 and d2 == 10:
+                return -1
+            if d1 == 10:
+                return d2
+            if d2 == 10:
+                return d1
+            return d1 * 10 + d2
+
+    def _assemble_potential_number(self, len_id: int, d1: int, d2: int):
+        if d1 == 10 and d2 == 10:
+            return -1
+        if d1 == 10:
+            return d2
+        if d2 == 10:
+            return d1
+        return d1 * 10 + d2
+
+    def _calculate_score(self, len_id: int, conf_len: float, conf_d1: float, conf_d2: float):
+        # """Calculate overall confidence score."""
+        if len_id == 0:
+            return conf_len
+        elif len_id == 1:
+            return (conf_len * conf_d1) ** 0.5
+        else:
+            return (conf_len * conf_d1 * conf_d2) ** (1/3)
