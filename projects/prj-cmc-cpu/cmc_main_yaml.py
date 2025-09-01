@@ -23,8 +23,8 @@ def parse_args():
         description="OpenMMPose CMC for Bounding Box Detection"
     )
 
-    add_argument(parser, 'in_rtsp', 'IN_RTSP_URL', 'rtsp://localhost:8554,topic=mystream')
-    add_argument(parser, 'out_mqtt', 'OUT_MQTT_URL', 'mqtt://localhost:1883,topic=cmc,qos=2,queue_max_len=50')
+    add_argument(parser, 'in_rtsp', 'IN_RTSP_URL', None) # 'rtsp://localhost:8554,topic=mystream'
+    add_argument(parser, 'out_mqtt', 'OUT_MQTT_URL', None) # 'mqtt://localhost:1883,topic=cmc,qos=2,queue_max_len=50'
 
     add_service_args(parser)
     add_compute_args(parser)

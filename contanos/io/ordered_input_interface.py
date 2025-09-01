@@ -7,17 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 import heapq
 
 class OrderedInputInterface:
-    """
-    Wraps another async interface (e.g., MQTTInputInterface, or MultiInputInterface) and guarantees that
-    `read_data()` yields frames in strictly increasing frame-id order. If frames
-    arrive out of order, they are buffered until the next expected id shows up,
-    or—if the buffer exceeds a threshold—this class will skip ahead to the
-    smallest available id to prevent unbounded latency/backlog.
-
-    Assumptions:
-    - The wrapped interface's `read_data()` returns: (data_list, metadata_list)
-      where at least one metadata dict contains 'frame_id_str' like "...FRAME:<int>".
-    """
 
     def __init__(self, interface, config: Dict[str, Any] = {}):
         super().__init__()
@@ -32,7 +21,7 @@ class OrderedInputInterface:
 
         # Ordering configuration
         # Max number of out-of-order frames to buffer before skipping ahead.
-        self.buffer_threshold: int = int(config.get("buffer_threshold", 50))
+        self.buffer_threshold: int = int(config.get("buffer_threshold", 10))
         # Optional starting frame id; if None, we'll infer from the first seen frame.
         self._start_frame_id: Optional[int] = config.get("start_frame_id")
 

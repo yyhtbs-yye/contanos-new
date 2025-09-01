@@ -28,9 +28,9 @@ def parse_args():
         description="Pytorch Mobilenet Jersey OCR GPU Service",
     )
 
-    add_argument(parser, 'in_rtsp', 'IN_RTSP_URL', 'rtsp://localhost:8554,topic=mystream')
-    add_argument(parser, 'in_mqtt', 'IN_MQTT_URL', 'mqtt://localhost:1883,topic=bytetrack,qos=2,queue_max_len=100')
-    add_argument(parser, 'out_mqtt', 'OUT_MQTT_URL', 'mqtt://localhost:1883,topic=jerseyocr,qos=2,queue_max_len=100')
+    add_argument(parser, 'in_rtsp', 'IN_RTSP_URL', None) # 'rtsp://localhost:8554,topic=mystream'
+    add_argument(parser, 'in_mqtt', 'IN_MQTT_URL', None) # 'mqtt://localhost:1883,topic=bytetrack,qos=2,queue_max_len=100'
+    add_argument(parser, 'out_mqtt', 'OUT_MQTT_URL', None) # 'mqtt://localhost:1883,topic=jerseyocr,qos=2,queue_max_len=100'
     add_argument(parser, 'devices', 'DEVICES', 'cuda:1')
     add_argument(parser, 'model_input_size', 'MODEL_INPUT_SIZE', '192,256')
     add_argument(parser, 'use_small', 'USE_SMALL', True)
