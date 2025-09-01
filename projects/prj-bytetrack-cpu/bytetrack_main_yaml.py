@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 # Import your modules here
 from bytetrack_worker import ByteTrackWorker
-from contanos.io.mqtt_sorted_input_interface import MQTTSortedInput
+# from contanos.io.mqtt_sorted_input_interface import MQTTSortedInput
+from contanos.io.ordered_input_interface import OrderedInputInterface
+from contanos.io.mqtt_input_interface import MQTTInput
 from contanos.io.mqtt_output_interface import MQTTOutput
 from contanos.helpers.create_a_processor import create_a_processor
 from contanos.helpers.start_a_service import start_a_service
@@ -21,15 +23,16 @@ from contanos.utils.create_args import add_argument, add_service_args, add_compu
 from contanos.utils.setup_logging import setup_logging
 from contanos.utils.parse_config_string import parse_config_string
 
-
 def parse_args():
     parser = argparse.ArgumentParser(
         description="BoxMOTLite ByteTrack Detection for Object Tracking"
     )
     
     # Optional overrides (these will override YAML config if provided)
-    add_argument(parser, 'in_mqtt', 'IN_MQTT_URL', None)
-    add_argument(parser, 'out_mqtt', 'OUT_MQTT_URL', None)
+    # add_argument(parser, 'in_mqtt', 'IN_MQTT_URL', None)
+    add_argument(parser, 'in_mqtt', 'IN_MQTT_URL', 'mqtt://localhost:1883,topic=yolox,qos=2,queue_max_len=100')
+    # add_argument(parser, 'out_mqtt', 'OUT_MQTT_URL', None)
+    add_argument(parser, 'out_mqtt', 'OUT_MQTT_URL', 'mqtt://localhost:1883,topic=bytetrack,qos=2,queue_max_len=100')
     add_argument(parser, 'devices', 'DEVICES', None)
 
     add_service_args(parser)
@@ -65,7 +68,7 @@ async def main():
         out_mqtt_config = parse_config_string(out_mqtt)
 
         # Create input/output interfaces
-        input_interface = MQTTSortedInput(config=in_mqtt_config)
+        input_interface = OrderedInputInterface(MQTTInput(config=in_mqtt_config))
         output_interface = MQTTOutput(config=out_mqtt_config)
         
         await input_interface.initialize()
@@ -105,7 +108,6 @@ async def main():
         
         logger.info("ByteTrack service started successfully")
         
-        
     except KeyboardInterrupt:
         logger.info("Received interrupt signal, shutting down...")
     except Exception as e:
@@ -117,10 +119,9 @@ async def main():
 # Debug monitoring function
 async def quick_debug():
     while True:
-        message_q = input_interface.message_queue.qsize()  # MQTT queue
         ordered_q = input_interface.ordered_queue.qsize()  # Ordered queue
         
-        logging.info(f"MESSAGE Q: {message_q}, ORDERED Q: {ordered_q}")
+        logging.info(f"ORDERED Q: {ordered_q}")
         await asyncio.sleep(1)
 
 if __name__ == "__main__":

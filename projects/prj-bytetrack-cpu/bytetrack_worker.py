@@ -28,6 +28,13 @@ class ByteTrackWorker(BaseWorker):
 
     def _predict(self, input: Any, metadata: Any) -> Any:
 
+        
+        if isinstance(input, list):
+            input = input[0]
+            metadata = metadata[0]
+
+        print(metadata['frame_id_str'].split("FRAME:")[1])
+
         if int(metadata.get('frame_id_str').split('FRAME:')[-1]) <= self.model_config.get('starting_frame_id', 1):
             print(f"[RESET] First Frame received - clearing buffers & restarting tracker")
 
