@@ -21,12 +21,13 @@ from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
+topic_subscribe = "bytetrack"
 
 def on_connect(client: mqtt.Client, userdata, flags, rc, properties=None):
     if rc == 0:
-        print(f"[{ts()}] Connected OK - subscribing to '#'")
+        print(f"[{ts()}] Connected OK - subscribing to {topic_subscribe}")
         # Subscribe to every topic, QoS 0
-        client.subscribe("cmc", qos=0)
+        client.subscribe(topic_subscribe, qos=2)
     else:
         print(f"[{ts()}] Bad connection (return-code={rc})")
         sys.exit(1)

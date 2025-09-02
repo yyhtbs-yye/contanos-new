@@ -1,0 +1,204 @@
+version: '2.4'
+
+services:
+  kafka-middleware:
+    image: bitnami/kafka:3.7
+    cpuset: "70,71,72,73"
+    container_name: kafka-middleware
+    ports:
+      - "9092:9092"   # Kafka client port
+    environment:
+      # Single-node KRaft (no ZooKeeper)
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka-middleware:9093
+      # If you connect from your HOST machine, keep localhost here:
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
+      # If other containers will connect, change to: PLAINTEXT://kafka-middleware:9092
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+    volumes:
+      - kafka-data:/bitnami/kafka
+    restart: unless-stopped
+
+  # RTSP server (MediaMTX)
+  rtsp-server:
+    image: bluenviron/mediamtx:latest
+    cpuset: "50,51,52,53"
+    container_name: rtsp-server
+    ports:
+      - "8554:8554"  # RTSP port
+      - "1935:1935"  # RTMP port
+    environment:
+      - MTX_PROTOCOLS=tcp
+    restart: unless-stopped
+
+  # RTSP server (MediaMTX)
+  rtsp-dashboard:
+    image: bluenviron/mediamtx:latest
+    cpuset: "60,61,62,63"
+    container_name: rtsp-dashboard
+    ports:
+      - "5108:8554"  # RTSP port
+      - "1937:1935"  # RTMP port
+    environment:
+      - MTX_PROTOCOLS=tcp
+    restart: unless-stopped
+
+
+  # MP4 streaming media source
+  mp4-rtsp-source:
+    build: ./mp4-rtsp-source-raw
+    container_name: mp4_rtsp_container
+    depends_on:
+      - rtsp-server
+    command: >
+      sh -c "echo '🎬 Starting video stream from $$VIDEO_FILE to $$RTSP_URL...' &&
+             if [ ! -f /source-videos/media/$$VIDEO_FILE ]; then
+               echo '❌ File not found: /source-videos/media/$$VIDEO_FILE' &&
+               echo '📁 Available files:' && ls -la /source-videos/media/ 2>/dev/null || echo 'Media directory not found' &&
+               exit 1;
+             fi &&
+             ffmpeg -re -stream_loop -1 -i /source-videos/media/$$VIDEO_FILE
+                    -c:v copy -preset veryfast -tune zerolatency
+                    -c:a aac -f rtsp $$RTSP_URL"
+    environment:
+      - RTSP_URL=rtsp://localhost:8554/rawstream
+      - VIDEO_FILE=SNMOT-153_1080p_30f.mp4
+    volumes:
+      - ./media:/source-videos/media:ro  # Mount local media directory
+    network_mode: host
+    restart: unless-stopped
+
+  mp4-transcode-sei:
+    build: ./mp4-transcoder-sei
+    container_name: mp4-transcoder-sei_container
+    depends_on:
+      - mp4-rtsp-source
+    command: 
+      - sh
+      - -c
+      - |
+        echo '🔄 Starting transcoding from $$IN_RTSP_URL to $$OUT_RTSP_URL...'
+        echo 'Testing ffmpeg availability...'
+        /usr/local/bin/ffmpeg -version | head -1
+        echo 'Testing x264 availability...'
+        /usr/local/bin/x264 --version | head -1
+        echo 'Starting transcoding pipeline...'
+        sleep 2
+        /usr/local/bin/ffmpeg -rtsp_transport tcp -i "$$IN_RTSP_URL" -an -f yuv4mpegpipe -pix_fmt yuv420p - | /usr/local/bin/x264 --demuxer y4m --fps 25 --preset fast --tune zerolatency --output - - | /usr/local/bin/ffmpeg -f h264 -i - -c:v copy -f rtsp -rtsp_transport tcp "$$OUT_RTSP_URL"
+    environment:
+      - IN_RTSP_URL=rtsp://localhost:8554/rawstream
+      - OUT_RTSP_URL=rtsp://localhost:8554/mystream
+    network_mode: host
+    restart: unless-stopped
+
+  # YOLOX object detection service
+  kafka-yolox-service:
+    build:
+      context: ./prj-yolox-onnx
+      dockerfile: Dockerfile
+    container_name: kafka-yolox-service
+    depends_on:
+      - kafka-middleware
+      - rtsp-server
+      - mp4-transcode-sei
+    command: ["bash", "-lc", "conda activate onnx && python yolox_main_yaml.py"]
+    network_mode: host
+    restart: unless-stopped
+    runtime: nvidia  # Requires GPU support
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONPATH=/app
+      - IN_RTSP_URL=rtsp://localhost:8554,topic=mystream,client_id=yolox_in
+      - OUT_KAFKA_URL=kafka://localhost:9092,topic=yolox,qos=2,queue_max_len=50,group_id=yolox_out,client_id=yolox_out
+      - DEVICES=cuda:3
+      - MODEL_INPUT_SIZE=640,640
+      - MODEL_URL=https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip
+
+  # RTMPose pose estimation service
+  kafka-rtmpose-service:
+    build:
+      context: ./prj-rtmpose-onnx
+      dockerfile: Dockerfile
+    container_name: kafka-rtmpose-service
+    depends_on:
+      - kafka-middleware
+      - kafka-yolox-service
+    command: ["bash", "-lc", "conda activate onnx && python rtmpose_main_yaml.py"]
+    network_mode: host
+    restart: unless-stopped
+    runtime: nvidia  # Requires GPU support
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTHONPATH=/app
+      - IN_RTSP_URL=rtsp://localhost:8554,topic=mystream
+      - IN_KAFKA_URL=kafka://localhost:9092,topic=yolox,qos=2,queue_max_len=100,group_id=rtmpose_in,client_id=rtmpose_in
+      - OUT_KAFKA_URL=kafka://localhost:9092,topic=rtmpose,qos=2,queue_max_len=100,group_id=rtmpose_out,client_id=rtmpose_out
+      - DEVICES=cuda:2,cuda:3
+      - MODEL_INPUT_SIZE=192,256
+      - MODEL_URL=https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip
+
+  kafka-cmc-service:
+    build:
+      context: ./prj-cmc-cpu
+      dockerfile: Dockerfile
+    container_name: kafka-cmc-service
+    depends_on:
+      - kafka-middleware
+      - rtsp-server
+      - mp4-transcode-sei
+    command: ["bash", "-lc", "conda activate cv2 && python cmc_main_yaml.py"]
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - PYTHONPATH=/app
+      - IN_RTSP_URL=rtsp://localhost:8554,topic=mystream,client_id=cmc_in
+      - OUT_KAFKA_URL=kafka://localhost:9092,topic=cmc,qos=2,queue_max_len=50,group_id=cmc_out,client_id=cmc_out
+
+  # ByteTrack object tracking service
+  kafka-bytetrack-service:
+    build:
+      context: ./prj-bytetrack-cpu
+      dockerfile: Dockerfile
+    container_name: kafka-bytetrack-service
+    depends_on:
+      - kafka-middleware
+      - kafka-yolox-service
+    command: ["bash", "-lc", "conda activate cv2 && python bytetrack_main_yaml.py"]
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - PYTHONPATH=/app
+      - IN_KAFKA_URL=kafka://localhost:9092,topic=yolox,qos=2,queue_max_len=100,group_id=bytetrack_in,client_id=bytetrack_in
+      - OUT_KAFKA_URL=kafka://localhost:9092,topic=bytetrack,qos=2,queue_max_len=100,group_id=bytetrack_out,client_id=bytetrack_out
+
+  # ByteTrack object tracking service
+  kafka-jerseyocr-service:
+    build:
+      context: ./prj-jerseyocr-gpu
+      dockerfile: Dockerfile
+    container_name: kafka-jerseyocr-service
+    depends_on:
+      - kafka-middleware
+      - rtsp-server
+      - mp4-transcode-sei
+      - kafka-bytetrack-service
+    command: ["bash", "-lc", "conda activate torch && python jerseyocr_main_yaml.py"]
+    network_mode: host
+    restart: unless-stopped
+    runtime: nvidia  # Requires GPU support
+    environment:
+      - PYTHONPATH=/app
+      - IN_RTSP_URL=rtsp://localhost:8554,topic=mystream
+      - IN_KAFKA_URL=kafka://localhost:9092,topic=bytetrack,qos=2,queue_max_len=100,group_id=jerseyocr_in,client_id=jerseyocr_in
+      - OUT_KAFKA_URL=kafka://localhost:9092,topic=jerseyocr,qos=2,queue_max_len=100,group_id=jerseyocr_out,client_id=jerseyocr_out
+      - DEVICES=cuda:1
+      - MODEL_INPUT_SIZE=256,192
+      - USE_SMALL=True
+
+volumes:
+  kafka-data:

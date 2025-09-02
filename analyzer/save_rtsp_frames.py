@@ -4,7 +4,7 @@ import time
 
 def capture_rtsp_to_mp4():
     # RTSP stream URL
-    rtsp_url = "rtsp://192.168.200.206:8554/annotated_stream?tcp"
+    rtsp_url = "rtsp://192.168.200.207:5108/annotated_stream?tcp"
 
     # Output file
     output_dir = "output"
@@ -30,6 +30,7 @@ def capture_rtsp_to_mp4():
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not fps or fps != fps or fps < 1:  # NaN check and bogus values
         fps = 25.0
+    fps = 25.0
 
     # Initialize VideoWriter (try a few common MP4 codecs)
     writer = None
@@ -50,7 +51,7 @@ def capture_rtsp_to_mp4():
     print(f"Recording to {output_path} at {fps:.2f} FPS using codec {used_codec}")
 
     frame_count = 0
-    max_frames = 320  # Stop after this many frames (adjust or remove to record indefinitely)
+    max_frames = 750  # Stop after this many frames (adjust or remove to record indefinitely)
 
     try:
         # We already have the first frame; write it
